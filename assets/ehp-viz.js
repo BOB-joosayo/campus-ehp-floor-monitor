@@ -40,6 +40,11 @@
     return ids;
   }
 
+  // 하루 누적 전력사용량을 받을 포인트 (실외기 전력사용량 15분, HABAZ040)
+  function dayPointIds() {
+    return MAP.outdoor.map((o) => o.pts.e15);
+  }
+
   function now() { return nowFn(); }
 
   function val(id) {
@@ -47,6 +52,13 @@
     if (!p || p.v === null || p.v === undefined) return { v: null, ts: null, stale: true };
     const stale = now().getTime() - p.ts > config.staleMin * 60 * 1000;
     return { v: p.v, ts: p.ts, stale };
+  }
+
+  // 여러 포인트 중 통신이 살아 있는 값의 가장 늦은 수집 시각
+  function latestOf(ids) {
+    let m = 0;
+    ids.forEach((id) => { const x = val(id); if (!x.stale && x.ts > m) m = x.ts; });
+    return m || null;
   }
 
   function indoorState(u) {
@@ -88,27 +100,12 @@
     return {
       key, running, kw: key === "comm" ? null : kw.v, mode: mode.v, load: loadPct, ts: kw.ts,
       e15: key === "comm" || e15.stale ? null : e15.v,
+      day: snap[o.pts.e15] && snap[o.pts.e15].day != null ? snap[o.pts.e15].day : null,
       modeLabel: MODE[mode.v] ? MODE[mode.v].label : "",
       modeKey: MODE[mode.v] ? MODE[mode.v].key : "on",
       inOn: indoor.filter((s) => s.running).length, inTotal: indoor.length,
       label: running ? "운전" : STATE_LABEL[key],
     };
-  }
-
-  // 같은 실외기에 묶인 운전 중 실내기가 냉방과 난방을 함께 요청하는 실외기 (실외기 카드 표식용)
-  function conflictOds() {
-    const out = new Set();
-    MAP.outdoor.forEach((o) => {
-      let c = 0, h = 0;
-      o.indoor.forEach((hk) => {
-        const s = indoorState(inByHoki[hk]);
-        if (!s.running) return;
-        if (s.mode === 1) c++;
-        if (s.mode === 2) h++;
-      });
-      if (c && h) out.add(o.hoki);
-    });
-    return out;
   }
 
   // 실외기 아이콘: 받침 달린 함체 + 왼쪽 원형 팬(운전 중 회전) + 오른쪽 그릴 + 작은 버튼 (화면 px 기준, 가운데 0,0)
@@ -125,7 +122,7 @@
   }
 
   // 실내기 아이콘: 벽걸이형 본체 + 모드별 움직임 (화면 px 기준, 가운데 0,0)
-  // 난방 빨간 물결, 냉방 파란 눈꽃과 찬바람, 송풍 바람, 제습 물방울, 자동 깜박이는 신호 표시와 보라 바람
+  // 난방 빨간 물결, 냉방 파란 눈꽃과 찬바람, 송풍 바람, 제습 물방울, 자동 깜박이는 AUTO 표시와 보라 바람
   function iuGlyph() {
     const wave = (x) => `<path d="M${x} 6.5 q1.6 1.4 0 2.8 q-1.6 1.4 0 2.8"/>`;
     const down = (x) => `<path d="M${x} 6.5 v4.6 M${x - 1.3} 9.8 l1.3 1.4 l1.3 -1.4"/>`;
@@ -143,7 +140,7 @@
       `<g class="fx fx-auto">${curve}</g>` +
       `<g class="bx bx-cool">${badge(`<g class="snow"><path d="M12 -11 V-5 M9.4 -9.5 L14.6 -6.5 M9.4 -6.5 L14.6 -9.5"/></g>`)}</g>` +
       `<g class="bx bx-dry">${badge(`<path class="drop" d="M12 -11.2 q2.5 3 0 4.9 q-2.5 -1.9 0 -4.9z"/>`)}</g>` +
-      `<g class="bx bx-auto">${badge(`<g class="wifi"><path d="M9.1 -8.4 a4.1 4.1 0 0 1 5.8 0"/><path d="M10.4 -7.2 a2.2 2.2 0 0 1 3.2 0"/><circle cx="12" cy="-5.9" r=".7"/></g>`)}</g>`;
+      `<g class="bx bx-auto"><g class="auto-tag"><rect x="0.8" y="-13.8" width="21" height="8.8" rx="4.4"/><text x="11.3" y="-9.4" text-anchor="middle" dominant-baseline="central">AUTO</text></g></g>`;
   }
 
   function roomText(u) {
@@ -182,32 +179,21 @@
     const el = document.getElementById("ev-top");
     el.innerHTML = `
       <div class="ev-title">A대학 B관 냉난방 운전 현황</div>
-      <nav class="ev-tabs">
+      <nav class="ev-tabs" aria-label="화면 전환">
         <a class="ev-tab ${active === "floor" ? "on" : ""}" href="floor.html">층별 도면</a>
         <a class="ev-tab ${active === "outdoor" ? "on" : ""}" href="outdoor.html">실외기 종합</a>
+        <a class="ev-tab ${active === "insight" ? "on" : ""}" href="insight.html">AI 인사이트 <em class="ev-badge" id="ev-ins-badge">0</em></a>
       </nav>
       <div class="ev-time" id="ev-time">-</div>`;
     listeners.push(() => {
       const t = latestTs();
-      document.getElementById("ev-time").textContent = t ? `${new Date(t).toLocaleDateString("ko-KR")} ${hhmm(t)} 수집 기준` : "-";
+      document.getElementById("ev-time").textContent = t ? `${new Date(t).toLocaleDateString("ko-KR")} ${hhmm(t)} 기준` : "-";
+      if (window.EhpInsight) {
+        const n = window.EhpInsight.activeByUnit(window.EhpViz).count;
+        const b = document.getElementById("ev-ins-badge");
+        if (b) b.textContent = String(n);
+      }
     });
-    if (window.EHP_MOCK && window.EHP_MOCK.active) renderScenarioBar();
-  }
-
-  function renderScenarioBar() {
-    const M = window.EHP_MOCK;
-    const bar = document.createElement("div");
-    bar.className = "ev-scen";
-    bar.innerHTML = "시연 데이터" + Object.entries(M.scenarios)
-      .map(([k, s]) => `<button data-k="${k}" class="${k === M.current() ? "on" : ""}">${s.name}</button>`).join("");
-    bar.addEventListener("click", (e) => {
-      const b = e.target.closest("button");
-      if (!b) return;
-      M.set(b.dataset.k);
-      bar.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
-      tick();
-    });
-    document.getElementById("ev-top").after(bar);
   }
 
   function setText(el, text) {
@@ -225,12 +211,11 @@
     setProvider: (fn) => (provider = fn),
     hasProvider: () => !!provider,
     useMockIfNoProvider() {
-      if (!provider && window.EHP_MOCK) { provider = window.EHP_MOCK.provider; config.refreshMs = 3000; }
-      else if (window.EHP_MOCK) window.EHP_MOCK.active = false;
+      if (!provider && window.EHP_MOCK) { provider = window.EHP_MOCK.provider; config.refreshMs = 60 * 1000; }
     },
     setNow: (fn) => (nowFn = fn),
-    now, val, indoorState, outdoorState, conflictOds, odGlyph, iuGlyph, roomText,
-    allPointIds, fmt, hhmm, latestTs, setText,
+    now, val, latestOf, indoorState, outdoorState, odGlyph, iuGlyph, roomText,
+    allPointIds, dayPointIds, fmt, hhmm, latestTs, setText,
     on: (fn) => listeners.push(fn),
     start: () => tick(),
     refresh: () => tick(),

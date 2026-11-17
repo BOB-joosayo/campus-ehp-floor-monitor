@@ -49,7 +49,21 @@
 
   const toSvg = (F, x, y) => [(x - F.ox) / F.scale, (F.oy - y) / F.scale];
   const toPx = (X, Y) => [(X - vb.x) * k, (Y - vb.y) * k];
+  // 해당 층 실내기는 전부 그린다. 실외기 미연결은 카드에서만 "연결된 실외기 없음"으로 표시
   const floorUnits = (f) => MAP.indoor.filter((u) => u.floor === f);
+  const floorOfOd = (h) => {
+    for (const f of ORDER) if (FL[f] && FL[f].od && FL[f].od[h]) return f;
+    return null;
+  };
+  function selectUnit(kind, hoki) {
+    hl = null;
+    selected = { kind, hoki: String(hoki) };
+    const target = kind === "iu"
+      ? (V.inByHoki[selected.hoki] && V.inByHoki[selected.hoki].floor)
+      : floorOfOd(selected.hoki);
+    if (target && target !== floor) goFloor(target);
+    else update();
+  }
   const iuPos = (u) => toSvg(FL[u.floor], u.x, u.y);
   const odPos = (h) => FL[floor].od[h] ? [FL[floor].od[h].x, FL[floor].od[h].y] : null;
 
@@ -77,11 +91,11 @@
     const s = (1 / k).toFixed(4);
     g("g-iu").innerHTML = floorUnits(floor).map((u) => {
       const [x, y] = iuPos(u);
-      return `<g class="iu" data-h="${u.hoki}" transform="translate(${x.toFixed(1)} ${y.toFixed(1)}) scale(${s})"><g class="gl">${V.iuGlyph()}</g><title></title></g>`;
+      return `<g class="iu" data-h="${u.hoki}" transform="translate(${x.toFixed(1)} ${y.toFixed(1)}) scale(${s})"><g class="gl">${V.iuGlyph()}<circle class="ins-dot" cx="14.5" cy="-11.5" r="2.1" display="none"/></g><title></title></g>`;
     }).join("");
     const so = (floor === "RF" ? 1.3 : 0.9) / k;
     g("g-od").innerHTML = Object.entries(F.od).map(([h, p]) =>
-      `<g class="od-mk" data-h="${h}" transform="translate(${p.x} ${p.y}) scale(${so.toFixed(4)})"><g class="gl">${V.odGlyph()}</g>` +
+      `<g class="od-mk" data-h="${h}" transform="translate(${p.x} ${p.y}) scale(${so.toFixed(4)})"><g class="gl">${V.odGlyph()}<circle class="ins-dot" cx="13.5" cy="-12" r="2.1" display="none"/></g>` +
       `<g class="od-tag"><rect x="-15" y="15.5" width="30" height="11" rx="5.5"/><text y="23.6">EHP-${Number(h)}</text></g><title></title></g>`).join("");
     drawTags();
     update();
@@ -167,8 +181,8 @@
   svg.addEventListener("click", (e) => {
     const iu = e.target.closest(".iu");
     const od = e.target.closest(".od-mk");
-    if (iu) selected = { kind: "iu", hoki: iu.dataset.h };
-    else if (od) selected = { kind: "od", hoki: od.dataset.h };
+    if (iu) { hl = null; selected = { kind: "iu", hoki: iu.dataset.h }; }
+    else if (od) { hl = null; selected = { kind: "od", hoki: od.dataset.h }; }
     else return; // 빈 곳을 눌러도 선택은 그대로 둔다
     update();
   });
@@ -235,7 +249,7 @@
   // 실외기 소속 강조 중이면 층 선택 옆에 실외기 층에서 실내기 층까지 흐르는 관을 그린다
   const floorsBox = g("floors");
   floorsBox.innerHTML = `<div class="fl-pipe" id="pipe"></div><div id="flbtns"></div>`;
-  function renderFloors() {
+  function renderFloors(marks) {
     let served = {}, src = null, pipeCls = "";
     if (hl) {
       const o = V.odByHoki[hl.od], s = V.outdoorState(o);
@@ -258,6 +272,7 @@
       if (f === floor) cls.push("on");
       if (served[f]) cls.push("served");
       if (f === src) cls.push("src");
+      if (marks && marks.floor[f]) cls.push("has-ins");
       return `<button class="${cls.join(" ")}" data-f="${f}" title="${V.FLOOR_LABEL[f]}">
         <b>${SHORT[f]}</b><small>${on}/${total}</small><i style="width:${total ? (on / total) * 100 : 0}%"></i>
         ${served[f] ? `<em class="cnt">${served[f]}대</em>` : ""}${f === src ? `<em class="cnt src">EHP-${Number(hl.od)}</em>` : ""}</button>`;
@@ -273,7 +288,8 @@
   }
 
   function update() {
-    renderFloors();
+    const marks = window.EhpInsight ? window.EhpInsight.activeByUnit(V) : { iu: {}, od: {}, floor: {}, list: [] };
+    renderFloors(marks);
 
     const sum = g("sum");
     if (floor === "RF") {
@@ -304,9 +320,12 @@
       if (isSel) cls.push("sel");
       if (hl && hl.units.has(u.hoki)) cls.push("hl");
       if (el === hoverEl) cls.push("hover");
+      if (marks.iu[u.hoki]) cls.push("has-ins");
       el.setAttribute("class", cls.join(" "));
       el.style.setProperty("--flow", `${(V.FAN_SEC[s.fan] || 1.6) * 0.9}s`);
       el.querySelector("title").textContent = `${u.label}  ${s.label}`;
+      const dot = el.querySelector(".ins-dot");
+      if (dot) dot.setAttribute("display", marks.iu[u.hoki] ? "inline" : "none");
       if (isSel && el.parentNode.lastElementChild !== el) el.parentNode.appendChild(el); // 맨 위로
     });
     // 실외기
@@ -319,18 +338,27 @@
       if (isSel) cls.push("sel");
       if (hl && hl.od === o.hoki) cls.push("hl");
       if (el === hoverEl) cls.push("hover");
+      if (marks.od[o.hoki]) cls.push("has-ins");
       el.setAttribute("class", cls.join(" "));
       el.style.setProperty("--spin", `${s.kw ? Math.max(0.45, 1.6 - s.kw / 20) : 1.6}s`);
       el.querySelector("title").textContent = `${o.label}  ${s.label}`;
+      const dot = el.querySelector(".ins-dot");
+      if (dot) dot.setAttribute("display", marks.od[o.hoki] ? "inline" : "none");
     });
     svg.classList.toggle("dim", !!hl);
-    renderCard();
+    renderCard(marks);
   }
 
   // ---------- 정보 꼬리표 카드 ----------
-  function renderCard() {
+  function renderCard(marks) {
     if (!selected || !onFloor(selected)) { card.classList.remove("show"); g("g-sel").innerHTML = ""; return; }
     let html, pos, k2;
+    const tip = (kind, h) => {
+      if (!marks) return "";
+      const n = kind === "iu" ? marks.iu[h] : marks.od[h];
+      if (!n) return "";
+      return `<div class="tc-ins"><span>인사이트 ${n}건</span><a href="insight.html">목록에서 보기</a></div>`;
+    };
     if (selected.kind === "iu") {
       const u = V.inByHoki[selected.hoki];
       const s = V.indoorState(u);
@@ -338,8 +366,8 @@
       k2 = s.key;
       pos = iuPos(u);
       const diff = s.room !== null && s.set !== null ? s.room - s.set : null;
-      html = `<div class="tc-h"><b>${esc(u.label)}</b><button class="tc-x" title="닫기">×</button></div>
-        <div class="tc-sub">${V.FLOOR_LABEL[u.floor]}  ${esc(V.roomText(u))}</div>
+      html = `<div class="tc-h"><b>${esc(V.roomText(u) || u.label)}</b><button class="tc-x" title="닫기">×</button></div>
+        <div class="tc-sub">${V.FLOOR_LABEL[u.floor]} · ${esc(u.label)}${o ? ` · ${esc(o.label)}` : ""}</div>
         <div class="tc-state"><span class="chip st-${s.key}">${s.label}</span></div>
         <div class="tc-big">
           <div><small>실내온도</small><b class="ev-num">${V.fmt(s.room)}</b><span>℃</span></div>
@@ -349,8 +377,11 @@
         <div class="tc-row"><span>운전모드</span><span>${V.MODE[s.mode] ? V.MODE[s.mode].label : "-"}</span></div>
         <div class="tc-row"><span>풍량</span><span>${V.FAN[s.fan] || "-"}</span></div>
         <div class="tc-row"><span>실내와 설정 차이</span><span class="ev-num">${diff === null ? "-" : (diff > 0 ? "+" : "") + V.fmt(diff) + " ℃"}</span></div>
-        <div class="tc-row"><span>연결 실외기</span>${o ? `<a class="tc-link ${hl && hl.od === o.hoki ? "on" : ""}" data-od="${o.hoki}">${esc(o.label)}</a>` : "<span>-</span>"}</div>
-        <div class="tc-foot">${V.hhmm(s.ts)} 수집</div>`;
+        <div class="tc-row"><span>연결 실외기</span>${o
+          ? `<a class="tc-link ${hl && hl.od === o.hoki ? "on" : ""}" data-od="${o.hoki}">${esc(o.label)}</a>`
+          : "<span class=\"ev-muted\">연결된 실외기 없음</span>"}</div>
+        ${tip("iu", u.hoki)}
+        <div class="tc-foot">${V.hhmm(s.ts)} 기준</div>`;
     } else {
       const o = V.odByHoki[selected.hoki];
       const s = V.outdoorState(o);
@@ -360,20 +391,21 @@
         <div class="tc-sub">실외기, ${esc(o.panel || "")}</div>
         <div class="tc-state"><span class="chip st-${k2}">${s.label}${s.running && s.modeLabel ? " " + s.modeLabel : ""}</span></div>
         <div class="tc-big">
-          <div class="wide"><small>전력사용량 (15분)</small><b class="ev-num">${V.fmt(s.e15, 2)}</b><span>kWh</span></div>
+          <div class="wide"><small>전력사용량</small><b class="ev-num">${V.fmt(s.e15, 2)}</b><span>kWh</span></div>
           <div><small>현재 전력</small><b class="ev-num">${V.fmt(s.kw, 2)}</b><span>kW</span></div>
           <div><small>부하율</small><b class="ev-num">${s.load === null ? "-" : V.fmt(s.load)}</b><span>%</span></div>
         </div>
         <div class="tc-row"><span>운전모드</span><span>${s.modeLabel || "-"}</span></div>
         <div class="tc-row"><span>연결 실내기</span><span class="ev-num">운전 ${s.inOn} / ${s.inTotal}</span></div>
         <a class="tc-btn ${hl && hl.od === o.hoki ? "on" : ""}" data-od="${o.hoki}">${hl && hl.od === o.hoki ? "강조 해제" : "연결 실내기 보기"}</a>
-        <div class="tc-foot">${V.hhmm(s.ts)} 수집</div>`;
+        ${tip("od", o.hoki)}
+        <div class="tc-foot">${V.hhmm(s.ts)} 기준</div>`;
     }
     card.className = `tagcard show st-${k2}`;
     card.innerHTML = html;
-    // 아이콘 오른쪽에 붙이고, 자리가 없으면 왼쪽
+    // 아이콘 오른쪽에 붙이고, 자리가 없으면 왼쪽. 팝오버는 트리거 쪽에서 스케일 인
     const [px, py] = toPx(pos[0], pos[1]);
-    const cw = plan.clientWidth, ch = plan.clientHeight, w = card.offsetWidth, h = card.offsetHeight;
+    const cw = plan.clientWidth, ch = plan.clientHeight, w = card.offsetWidth || 304, h = card.offsetHeight || 280;
     const gap = 44;
     const right = px + gap + w < cw - 8;
     const left = right ? px + gap : px - gap - w;
@@ -382,6 +414,8 @@
     card.style.top = `${top}px`;
     card.classList.toggle("to-left", !right);
     card.style.setProperty("--arrow", `${Math.max(14, Math.min(h - 14, py - top))}px`);
+    card.style.setProperty("--origin-x", right ? "0%" : "100%");
+    card.style.setProperty("--origin-y", `${Math.max(8, Math.min(92, ((py - top) / Math.max(h, 1)) * 100))}%`);
     // 아이콘과 카드를 잇는 선
     const ax = vb.x + (right ? px + 15 * SEL_SCALE * 0.6 : px - 15 * SEL_SCALE * 0.6) / k;
     const bx = vb.x + (right ? left : left + w) / k;
@@ -395,8 +429,11 @@
   requestAnimationFrame(() => {
     drawFloor();
     V.start().then(() => {
+      const iu = params.get("iu");
       const od = params.get("od");
-      if (od && V.odByHoki[od]) highlightOd(od);
+      // 인사이트/실외기에서 넘어오면 해당 기기만 선택 (소속 전체 흐름 강조는 하지 않음)
+      if (iu && V.inByHoki[iu]) selectUnit("iu", iu);
+      else if (od && V.odByHoki[od]) selectUnit("od", od);
     });
   });
 })();
