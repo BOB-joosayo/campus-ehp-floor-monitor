@@ -38,18 +38,19 @@
     return st;
   }
 
-  let tickN = 0;
+  // EMS 15분 슬롯. 같은 슬롯에서는 값이 흔들리지 않게 슬롯 키로 시연한다.
   async function provider() {
     const t = new Date();
-    const ts = Math.floor(t.getTime() / (15 * 60 * 1000)) * 15 * 60 * 1000;
+    const slotMs = 15 * 60 * 1000;
+    const ts = Math.floor(t.getTime() / slotMs) * slotMs;
+    const slotKey = String(Math.floor(ts / slotMs));
     const old = ts - 2 * 3600 * 1000;
     const st = indoorBase();
     const out = {};
     const put = (id, v, comm) => { out[id] = { v, ts: comm ? old : ts }; };
-    tickN++;
     MAP.indoor.forEach((u) => {
       const s = st[u.hoki];
-      const j = (rnd(u.hoki + tickN) - 0.5) * 0.2;
+      const j = (rnd(u.hoki + "r" + slotKey) - 0.5) * 0.3;
       put(u.pts.onoff, s.on, s.comm);
       put(u.pts.mode, s.mode, s.comm);
       put(u.pts.fan, s.fan, s.comm);
@@ -59,29 +60,40 @@
     MAP.outdoor.forEach((o) => {
       const plan = OD_PLAN[o.hoki] ?? 2;
       const comm = plan === "comm";
-      const ons = o.indoor.map((h) => ({ u: window.EhpViz.inByHoki[h], s: st[h] })).filter((x) => x.s.on);
+      const off = plan === "off";
+      const ons = o.indoor.map((h) => ({ u: window.EhpViz.inByHoki[h], s: st[h] })).filter((x) => x.s && x.s.on);
       const mode = typeof plan === "number" ? plan : (Number(o.hoki) >= 22 ? 1 : 2);
       const per = mode === 3 ? 0.04 : mode === 4 ? 0.1 : 0.2;   // 송풍, 제습은 전력이 작다
-      const rated = capKw(o.model) * 0.9;
-      let kw = ons.reduce((a, x) => a + capKw(x.u.model) * per, 0);
-      kw = Math.min(rated, kw * (1 + (rnd(o.hoki + tickN) - 0.5) * 0.08));
-      kw = Math.round(kw * 1000) / 1000;
-      const load = kw > 0 ? Math.round((kw / rated) * 1000) / 10 : 0;
+      const rated = Math.max(3, capKw(o.model) * 0.9);
+      let kw = 0;
+      if (!comm && !off) {
+        if (ons.length) {
+          kw = ons.reduce((a, x) => a + capKw(x.u && x.u.model) * per, 0);
+          kw = Math.min(rated, kw * (1 + (rnd(o.hoki + "kw" + slotKey) - 0.5) * 0.08));
+        } else {
+          // 시연: 실내기가 꺼져 있어도 운전 계획이면 순시전력을 보이게
+          kw = rated * (0.12 + rnd(o.hoki + "kw0" + slotKey) * 0.35);
+        }
+        kw = Math.round(Math.max(0.3, kw) * 1000) / 1000;
+      }
+      const load = kw > 0 ? Math.min(99, Math.round((kw / rated) * 1000) / 10) : 0;
+      const e15 = Math.round((kw * 0.25) * 1000) / 1000; // 15분 전력사용량 kWh
       put(o.pts.onoff, kw > 0 ? 1 : 0, comm);
       put(o.pts.mode, mode, comm);
-      put(o.pts.oat, 12 + rnd(o.hoki + "t") * 3, comm);
+      put(o.pts.oat, Math.round((12 + rnd(o.hoki + "t" + slotKey) * 3) * 10) / 10, comm);
       put(o.pts.qc, 0, comm);
       put(o.pts.qh, 0, comm);
       put(o.pts.kw, kw, comm);
-      put(o.pts.kwh, 3000 + rnd(o.hoki) * 30000, comm);
+      put(o.pts.kwh, Math.round(3000 + rnd(o.hoki) * 30000), comm);
       put(o.pts.load, load, comm);
       put(o.pts.cop, 0, comm);
-      put(o.pts.e15, Math.round((kw / 4) * 1000) / 1000, comm);
+      put(o.pts.e15, e15, comm);
       put(o.pts.run, kw > 0 ? 0.25 : 0, comm);
-      // 하루 누적: 오늘 00:00부터 지금까지 15분 전력사용량 합. 아침 7시부터 돌았다고 보고 만든다
-      const slots = Math.max(0, (t.getHours() - 7) * 4 + Math.floor(t.getMinutes() / 15));
-      const avg = (kw > 0 ? kw : capKw(o.model) * 0.12) / 4;
-      out[o.pts.e15].day = Math.round(avg * slots * (0.45 + rnd(o.hoki + "d") * 0.4) * 10) / 10;
+      const dayStart = new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
+      const slotsToday = Math.max(1, Math.floor((ts - dayStart) / slotMs) + 1);
+      const avg15 = e15 > 0 ? e15 : (rated * 0.15 * 0.25);
+      const day = Math.round(avg15 * slotsToday * (0.55 + rnd(o.hoki + "d") * 0.4) * 10) / 10;
+      out[o.pts.e15].day = comm ? 0 : Math.max(day, kw > 0 ? Math.round(e15 * 4 * 10) / 10 : 0);
     });
     return out;
   }
@@ -89,36 +101,124 @@
   function at(y, m, d, hh, mm) {
     return new Date(y, m - 1, d, hh, mm, 0, 0).getTime();
   }
+  function ymd(d) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
 
-  // 시연: 지금이 심야·방학이 아니어도 인사이트 목록이 비지 않도록 몇 건을 넣는다
+  // 시연: 에피소드(from~to). 한 기기에 여러 유형이 시간상 겹치게 넣어 중복 알람 UI를 본다.
+  function todayAt(hh, mm) {
+    const d = new Date();
+    d.setHours(hh, mm, 0, 0);
+    return d.getTime();
+  }
   function demoLiveInsights(V) {
-    const uNight = V.MAP.indoor.find((u) => u.od === "07" && V.indoorState(u).running) || V.MAP.indoor.find((u) => u.od === "07");
+    const uMain = V.MAP.indoor.find((u) => u.od === "07" && V.indoorState(u).running) || V.MAP.indoor.find((u) => u.od === "07");
     const uVac = V.MAP.indoor.find((u) => u.od === "03" && V.indoorState(u).running) || V.MAP.indoor.find((u) => u.od === "03");
-    const oSea = V.odByHoki["22"]; // 냉방 EHP (11월 시연용 계절 불일치)
+    const oSea = V.odByHoki["22"];
     const now = V.now().getTime();
+    const day = ymd(new Date(now));
     const rows = [];
-    if (uNight) {
-      const since = new Date();
-      since.setHours(0, 12, 0, 0);
-      const nightEnd = new Date();
-      nightEnd.setHours(6, 0, 0, 0);
-      const nightRunMin = Math.max(60, Math.floor((Math.min(now, nightEnd.getTime()) - since.getTime()) / 60000));
+    if (uMain) {
+      const base = { floor: uMain.floor, od: uMain.od, iu: uMain.hoki };
+      // 심야 00:12~05:45
       rows.push({
-        id: `demo-night-${uNight.hoki}`,
+        id: `demo-night-${uMain.hoki}-${day}`,
         type: "night",
         sev: "주의",
         title: "심야 연속 운전",
-        msg: "심야(00:00~06:00)에 실내기가 운전 중입니다. 00:12부터 이어진 구간이며, 중간 끊김은 없습니다.",
-        ts: now,
-        floor: uNight.floor,
-        od: uNight.od,
-        iu: uNight.hoki,
-        since: since.getTime(),
-        sinceLabel: "00:12부터",
-        nightRunMin,
-        gapMin: 10,
-        gapCount: 0,
-        evidence: "시연 데이터, 심야 누적 운전 예시",
+        msg: "심야(00:00~06:00)에 실내기가 운전했습니다.",
+        ts: todayAt(0, 12),
+        from: todayAt(0, 12),
+        to: todayAt(5, 45),
+        nightRunMin: 333,
+        evidence: "시연: 심야 에피소드",
+        ...base,
+      });
+      // 실내·설정 차이: 심야와 겹침 01:00~04:30, 낮 09:00~12:15, 오후~진행 중
+      rows.push({
+        id: `demo-setgap-a-${uMain.hoki}-${day}`,
+        type: "setgap",
+        sev: "확인 권장",
+        title: "실내, 설정 온도 차이",
+        msg: "설정 24℃, 실내 30.1℃로 차이가 6.1℃입니다. 원인(도달 여부, 센서, 외기 등)은 현장에서 확인해 주세요.",
+        ts: todayAt(1, 0),
+        from: todayAt(1, 0),
+        to: todayAt(4, 30),
+        set: 24,
+        room: 30.1,
+        evidence: "시연: 심야와 겹친 차이",
+        ...base,
+      });
+      rows.push({
+        id: `demo-setgap-b-${uMain.hoki}-${day}`,
+        type: "setgap",
+        sev: "확인 권장",
+        title: "실내, 설정 온도 차이",
+        msg: "설정 24℃, 실내 29.0℃로 차이가 5.0℃입니다. 원인(도달 여부, 센서, 외기 등)은 현장에서 확인해 주세요.",
+        ts: todayAt(9, 0),
+        from: todayAt(9, 0),
+        to: todayAt(12, 15),
+        set: 24,
+        room: 29,
+        evidence: "시연: 오전 차이",
+        ...base,
+      });
+      rows.push({
+        id: `demo-setgap-c-${uMain.hoki}-${day}`,
+        type: "setgap",
+        sev: "확인 권장",
+        title: "실내, 설정 온도 차이",
+        msg: "설정 24℃, 실내 29.5℃로 차이가 5.5℃입니다. 원인(도달 여부, 센서, 외기 등)은 현장에서 확인해 주세요.",
+        ts: Math.min(todayAt(14, 0), now - 50 * 60000),
+        from: Math.min(todayAt(14, 0), now - 50 * 60000),
+        to: null,
+        open: true,
+        set: 24,
+        room: 29.5,
+        evidence: "시연: 진행 중",
+        ...base,
+      });
+      // 설정온도 이상: 08:30~11:00 (오전 차이와 겹침) + 이상하게 심야에도 설정 28
+      rows.push({
+        id: `demo-set-a-${uMain.hoki}-${day}`,
+        type: "setpoint",
+        sev: "주의",
+        title: "설정온도 이상",
+        msg: `${V.roomText(uMain) || uMain.label} 냉방인데 설정 28℃로 너무 높습니다.`,
+        ts: todayAt(2, 0),
+        from: todayAt(2, 0),
+        to: todayAt(3, 30),
+        set: 28,
+        room: 27,
+        evidence: "시연: 심야에 설정 이상까지 겹침",
+        ...base,
+      });
+      rows.push({
+        id: `demo-set-b-${uMain.hoki}-${day}`,
+        type: "setpoint",
+        sev: "주의",
+        title: "설정온도 이상",
+        msg: `${V.roomText(uMain) || uMain.label} 냉방인데 설정 27℃로 너무 높습니다.`,
+        ts: todayAt(8, 30),
+        from: todayAt(8, 30),
+        to: todayAt(11, 0),
+        set: 27,
+        room: 26,
+        evidence: "시연: 오전 설정 이상, 차이와 겹침",
+        ...base,
+      });
+      // 계절 불일치도 같은 기기에 (시연용으로 한겨울 냉방처럼)
+      rows.push({
+        id: `demo-season-iu-${uMain.hoki}-${day}`,
+        type: "season",
+        sev: "주의",
+        title: "계절과 모드 불일치",
+        msg: "한겨울 기준으로 보면 냉방으로 운전 중입니다. (시연: 같은 기기에 중복)",
+        ts: todayAt(10, 0),
+        from: todayAt(10, 0),
+        to: todayAt(16, 0),
+        evidence: "시연: 낮 구간 계절+차이+설정 일부 겹침",
+        ...base,
       });
     }
     if (uVac) {
@@ -128,13 +228,13 @@
         sev: "확인 권장",
         title: "방학·휴일형 운전",
         msg: "방학·휴일 기간 설정 기준으로 보면 실내기가 운전 중입니다. 실제 이용인지 확인해 주세요.",
-        ts: now,
+        ts: Math.min(todayAt(9, 30), now - 40 * 60000),
+        from: Math.min(todayAt(9, 30), now - 40 * 60000),
+        to: null,
+        open: true,
         floor: uVac.floor,
         od: uVac.od,
         iu: uVac.hoki,
-        since: now - 95 * 60000,
-        sinceLabel: "약 1시간 35분 전부터",
-        runMin: 95,
         evidence: "시연 데이터, 방학 중 운전 예시",
       });
     }
@@ -145,35 +245,14 @@
         sev: "주의",
         title: "계절과 모드 불일치",
         msg: "한겨울 기준으로 보면 냉방으로 운전 중입니다. (시연: 계절 불일치 예시)",
-        ts: now,
+        ts: Math.min(todayAt(8, 0), now - 90 * 60000),
+        from: Math.min(todayAt(8, 0), now - 90 * 60000),
+        to: null,
+        open: true,
         floor: null,
         od: oSea.hoki,
         iu: null,
-        since: now - 40 * 60000,
-        sinceLabel: "약 40분 전부터",
-        runMin: 40,
         evidence: "시연 데이터, 겨울-냉방 예시",
-      });
-    }
-    const uSet = V.MAP.indoor.find((u) => u.od === "05" && V.indoorState(u).running)
-      || V.MAP.indoor.find((u) => V.indoorState(u).running)
-      || V.MAP.indoor[0];
-    if (uSet) {
-      rows.push({
-        id: `demo-set-${uSet.hoki}`,
-        type: "setpoint",
-        sev: "주의",
-        title: "설정온도 이상",
-        msg: `${V.roomText(uSet) || uSet.label} 설정온도 30℃로 운전 중입니다. 기기 설정 가능 범위(16~30℃) 상한이거나 모드와 안 맞는 설정입니다.`,
-        ts: now,
-        floor: uSet.floor,
-        od: uSet.od,
-        iu: uSet.hoki,
-        set: 30,
-        room: 24.5,
-        since: now - 50 * 60000,
-        sinceLabel: "약 50분 전부터",
-        evidence: "시연 데이터, 설정온도 30℃",
       });
     }
     const oPow = V.odByHoki["04"] || V.MAP.outdoor.find((o) => V.outdoorState(o).running);
@@ -220,8 +299,11 @@
         const q = Math.floor(r("d" + h) * 5); // 0~4
         return r("d" + h + "on") > 0.4 ? Math.max(1, q) : q;
       });
+      // 시연: 실내기는 심야에도 일부 돌린 것처럼 보이게 (알람 이력과 맞춤)
+      if (insight.iu && insight.type !== "comm") {
+        for (let h = 0; h < 6; h++) hours[h] = Math.max(hours[h], h === 0 ? 3 : h === 5 ? 2 : 4);
+      }
       if (insight.type === "night") {
-        // 심야도 일부 시는 부분 운전으로 보이게 (00시 45분, 05시 30분 등)
         hours[0] = 3;
         hours[5] = 2;
       }
@@ -229,7 +311,9 @@
       const nightMin = hours.slice(0, 6).reduce((a, q) => a + q * 15, 0);
       return {
         hours,
-        caption: `오늘 기준 운전 ${fmtRunMin(onMin)} · 심야(00~06) ${fmtRunMin(nightMin)}. 칸 높이는 15분 단위(최대 4칸=60분)입니다. 노란 테두리는 심야 구간입니다.`,
+        onMin,
+        nightMin,
+        caption: `오늘 기준 운전 ${fmtRunMin(onMin)}, 심야(00~06) ${fmtRunMin(nightMin)}.`,
       };
     }
     if (period === "month") {
@@ -260,22 +344,107 @@
     };
   }
 
+  // 과거 일별 조회용. 어제·그제 등도 날짜를 넘기면 보이도록 상대 일자로 넣는다.
+  function daysAgoAt(V, daysBack, hh, mm) {
+    const d = new Date(V.now().getTime());
+    d.setDate(d.getDate() - daysBack);
+    d.setHours(hh, mm, 0, 0);
+    return d.getTime();
+  }
   function insightHistory(V) {
     const pick = (od) => V.MAP.indoor.find((u) => u.od === od) || V.MAP.indoor[0];
     const a = pick("01"), b = pick("06"), c = pick("13"), d = pick("16");
+    const main = pick("07");
+    const mb = { floor: main.floor, od: main.od, iu: main.hoki };
+    const y1 = ymd(new Date(daysAgoAt(V, 1, 12, 0)));
+    const y2 = ymd(new Date(daysAgoAt(V, 2, 12, 0)));
+    const y3 = ymd(new Date(daysAgoAt(V, 3, 12, 0)));
     return [
-      { id: "h-n1", type: "night", sev: "주의", title: "심야 연속 운전", msg: `실내기가 심야에도 운전했습니다.`, ts: at(2026, 11, 16, 2, 15), floor: a.floor, od: a.od, iu: a.hoki, since: at(2026, 11, 16, 0, 20), sinceLabel: "00:20부터", nightRunMin: 115, gapCount: 0, gapMin: 10, evidence: "심야 누적 115분" },
-      { id: "h-n2", type: "night", sev: "주의", title: "심야 연속 운전", msg: `실내기가 심야에도 운전했습니다.`, ts: at(2026, 11, 15, 3, 0), floor: b.floor, od: b.od, iu: b.hoki, since: at(2026, 11, 15, 1, 10), sinceLabel: "01:10부터", nightRunMin: 110, gapCount: 1, gapMin: 10, evidence: "심야 누적 110분, 8분 끊김 1회" },
-      { id: "h-v1", type: "vacation", sev: "확인 권장", title: "방학·휴일형 운전", msg: `하계방학 중 ${V.odByHoki["17"].label}이(가) 운전했습니다.`, ts: at(2026, 7, 14, 14, 30), floor: null, od: "17", iu: null, evidence: "하계방학 2026-06-23~08-31" },
-      { id: "h-v2", type: "vacation", sev: "확인 권장", title: "방학·휴일형 운전", msg: `하계방학 중 ${V.roomText(c) || c.label} 실내기가 운전했습니다.`, ts: at(2026, 8, 5, 11, 0), floor: c.floor, od: c.od, iu: c.hoki, evidence: "하계방학 중 운전" },
-      { id: "h-s1", type: "season", sev: "주의", title: "계절과 모드 불일치", msg: `한여름에 ${V.odByHoki["01"].label}이(가) 난방으로 운전했습니다.`, ts: at(2026, 7, 20, 13, 0), floor: null, od: "01", iu: null, evidence: "7월, 난방" },
-      { id: "h-t1", type: "setpoint", sev: "주의", title: "설정온도 이상", msg: `${V.roomText(c) || c.label} 설정온도 30℃로 운전했습니다.`, ts: at(2026, 11, 10, 15, 20), floor: c.floor, od: c.od, iu: c.hoki, set: 30, room: 25, evidence: "설정 30℃" },
-      { id: "h-p1", type: "power", sev: "주의", title: "전력 패턴 이상", msg: `${V.odByHoki["04"].label} 부하율이 비정상적으로 높았습니다.`, ts: at(2026, 11, 8, 11, 0), floor: null, od: "04", iu: null, evidence: "부하율 96%" },
-      { id: "h-c1", type: "comm", sev: "중요", title: "통신 끊김 장기화", msg: `${V.odByHoki["12"].label} 통신이 오래 끊겼습니다.`, ts: at(2026, 10, 3, 9, 45), floor: null, od: "12", iu: null, evidence: "30분 이상 미수신" },
-      { id: "h-c2", type: "comm", sev: "중요", title: "통신 끊김 장기화", msg: `${V.roomText(d) || d.label} 실내기 통신이 오래 끊겼습니다.`, ts: at(2026, 9, 12, 16, 15), floor: d.floor, od: d.od, iu: d.hoki, evidence: "30분 이상 미수신" },
-      { id: "h-n3", type: "night", sev: "주의", title: "심야 연속 운전", msg: `실내기가 심야에도 운전했습니다.`, ts: at(2026, 10, 28, 1, 30), floor: a.floor, od: a.od, iu: a.hoki, since: at(2026, 10, 28, 0, 5), sinceLabel: "00:05부터", nightRunMin: 85, gapCount: 0, gapMin: 10, evidence: "심야 누적 85분" },
+      // 어제: 같은 기기(EHP-7 계통)에 여러 유형
+      {
+        id: `hist-night-${main.hoki}-${y1}`, type: "night", sev: "주의", title: "심야 연속 운전",
+        msg: "심야(00:00~06:00)에 실내기가 운전했습니다.",
+        ts: daysAgoAt(V, 1, 0, 20), from: daysAgoAt(V, 1, 0, 20), to: daysAgoAt(V, 1, 5, 40),
+        nightRunMin: 320, evidence: "시연: 어제 심야", ...mb,
+      },
+      {
+        id: `hist-gap-${main.hoki}-${y1}`, type: "setgap", sev: "확인 권장", title: "실내, 설정 온도 차이",
+        msg: "설정 24℃, 실내 29.8℃로 차이가 5.8℃입니다. 원인(도달 여부, 센서, 외기 등)은 현장에서 확인해 주세요.",
+        ts: daysAgoAt(V, 1, 9, 0), from: daysAgoAt(V, 1, 9, 0), to: daysAgoAt(V, 1, 15, 30),
+        set: 24, room: 29.8, evidence: "시연: 어제 차이", ...mb,
+      },
+      {
+        id: `hist-set-${main.hoki}-${y1}`, type: "setpoint", sev: "주의", title: "설정온도 이상",
+        msg: `${V.roomText(main) || main.label} 냉방인데 설정 28℃로 너무 높습니다.`,
+        ts: daysAgoAt(V, 1, 10, 0), from: daysAgoAt(V, 1, 10, 0), to: daysAgoAt(V, 1, 12, 0),
+        set: 28, room: 26, evidence: "시연: 어제 설정 이상", ...mb,
+      },
+      // 그제
+      {
+        id: `hist-night-${main.hoki}-${y2}`, type: "night", sev: "주의", title: "심야 연속 운전",
+        msg: "심야(00:00~06:00)에 실내기가 운전했습니다.",
+        ts: daysAgoAt(V, 2, 0, 5), from: daysAgoAt(V, 2, 0, 5), to: daysAgoAt(V, 2, 6, 0),
+        nightRunMin: 355, evidence: "시연: 그제 심야", ...mb,
+      },
+      {
+        id: `hist-gap-${main.hoki}-${y2}`, type: "setgap", sev: "확인 권장", title: "실내, 설정 온도 차이",
+        msg: "설정 23℃, 실내 28.5℃로 차이가 5.5℃입니다. 원인(도달 여부, 센서, 외기 등)은 현장에서 확인해 주세요.",
+        ts: daysAgoAt(V, 2, 13, 0), from: daysAgoAt(V, 2, 13, 0), to: daysAgoAt(V, 2, 18, 0),
+        set: 23, room: 28.5, evidence: "시연: 그제 차이", ...mb,
+      },
+      {
+        id: `hist-comm-od12-${y2}`, type: "comm", sev: "중요", title: "통신 끊김 장기화",
+        msg: `${V.odByHoki["12"].label} 통신이 오래 끊겼습니다.`,
+        ts: daysAgoAt(V, 2, 8, 0), from: daysAgoAt(V, 2, 8, 0), to: daysAgoAt(V, 2, 11, 30),
+        floor: null, od: "12", iu: null, evidence: "시연: 그제 통신",
+      },
+      // 3일 전
+      {
+        id: `hist-season-${main.hoki}-${y3}`, type: "season", sev: "주의", title: "계절과 모드 불일치",
+        msg: "한겨울 기준으로 보면 냉방으로 운전 중입니다.",
+        ts: daysAgoAt(V, 3, 11, 0), from: daysAgoAt(V, 3, 11, 0), to: daysAgoAt(V, 3, 17, 0),
+        evidence: "시연: 3일 전 계절", ...mb,
+      },
+      {
+        id: `hist-power-04-${y3}`, type: "power", sev: "주의", title: "전력 패턴 이상",
+        msg: `${V.odByHoki["04"].label} 부하율이 비정상적으로 높았습니다.`,
+        ts: daysAgoAt(V, 3, 14, 0), from: daysAgoAt(V, 3, 14, 0), to: daysAgoAt(V, 3, 16, 0),
+        floor: null, od: "04", iu: null, evidence: "시연: 3일 전 전력",
+      },
+      // 더 먼 과거 (고정 샘플)
+      { id: "h-n1", type: "night", sev: "주의", title: "심야 연속 운전", msg: `실내기가 심야에도 운전했습니다.`, ts: at(2026, 11, 16, 2, 15), from: at(2026, 11, 16, 0, 20), to: at(2026, 11, 16, 5, 50), floor: a.floor, od: a.od, iu: a.hoki, nightRunMin: 115, evidence: "심야 누적 115분" },
+      { id: "h-n2", type: "night", sev: "주의", title: "심야 연속 운전", msg: `실내기가 심야에도 운전했습니다.`, ts: at(2026, 11, 15, 3, 0), from: at(2026, 11, 15, 1, 10), to: at(2026, 11, 15, 5, 0), floor: b.floor, od: b.od, iu: b.hoki, nightRunMin: 110, evidence: "심야 누적 110분" },
+      { id: "h-v1", type: "vacation", sev: "확인 권장", title: "방학·휴일형 운전", msg: `하계방학 중 ${V.odByHoki["17"].label}이(가) 운전했습니다.`, ts: at(2026, 7, 14, 14, 30), from: at(2026, 7, 14, 9, 0), to: at(2026, 7, 14, 17, 0), floor: null, od: "17", iu: null, evidence: "하계방학" },
+      { id: "h-t1", type: "setpoint", sev: "주의", title: "설정온도 이상", msg: `${V.roomText(c) || c.label} 설정온도 30℃로 운전했습니다.`, ts: at(2026, 11, 10, 15, 20), from: at(2026, 11, 10, 13, 0), to: at(2026, 11, 10, 16, 0), floor: c.floor, od: c.od, iu: c.hoki, set: 30, room: 25, evidence: "설정 30℃" },
+      { id: "h-c1", type: "comm", sev: "중요", title: "통신 끊김 장기화", msg: `${V.odByHoki["12"].label} 통신이 오래 끊겼습니다.`, ts: at(2026, 10, 3, 9, 45), from: at(2026, 10, 3, 8, 0), to: at(2026, 10, 3, 12, 0), floor: null, od: "12", iu: null, evidence: "30분 이상 미수신" },
+      { id: "h-c2", type: "comm", sev: "중요", title: "통신 끊김 장기화", msg: `${V.roomText(d) || d.label} 실내기 통신이 오래 끊겼습니다.`, ts: at(2026, 9, 12, 16, 15), from: at(2026, 9, 12, 14, 0), to: at(2026, 9, 12, 18, 0), floor: d.floor, od: d.od, iu: d.hoki, evidence: "30분 이상 미수신" },
     ];
   }
 
-  window.EHP_MOCK = { provider, demoLiveInsights, insightHistory, runPattern };
+  // 설비 운전분. 실서비스는 ON/OFF(또는 실외기 전력) 15분 이력을 일/월/연으로 합산 저장·조회.
+  function dayRunMin(V, ref, period) {
+    const p = period || "day";
+    const pat = runPattern(V, {
+      iu: ref && ref.iu ? ref.iu : null,
+      od: ref && ref.od ? ref.od : null,
+      type: "setpoint",
+    }, p);
+    if (p === "day") {
+      return {
+        onMin: pat.onMin || 0,
+        nightMin: pat.nightMin || 0,
+        label: fmtRunMin(pat.onMin || 0),
+        nightLabel: fmtRunMin(pat.nightMin || 0),
+      };
+    }
+    const onMin = (pat.rows || []).reduce((a, row) => a + (row.min || 0), 0);
+    return {
+      onMin,
+      nightMin: 0,
+      label: fmtRunMin(onMin),
+      nightLabel: "-",
+    };
+  }
+
+  window.EHP_MOCK = { provider, demoLiveInsights, insightHistory, runPattern, dayRunMin, fmtRunMin };
 })();

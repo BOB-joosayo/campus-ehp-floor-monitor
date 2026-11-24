@@ -104,7 +104,7 @@
       modeLabel: MODE[mode.v] ? MODE[mode.v].label : "",
       modeKey: MODE[mode.v] ? MODE[mode.v].key : "on",
       inOn: indoor.filter((s) => s.running).length, inTotal: indoor.length,
-      label: running ? "운전" : STATE_LABEL[key],
+      label: running ? (MODE[mode.v] ? MODE[mode.v].label : "운전") : STATE_LABEL[key],
     };
   }
 

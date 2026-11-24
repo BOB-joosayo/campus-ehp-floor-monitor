@@ -9,6 +9,15 @@
   const PAD = { l: 112, t: 52, r: 16, b: 36 }; // 도면 위에 띄운 층 선택, 요약, 범례 자리 (px)
   const SEL_SCALE = 1.9;                       // 선택한 아이콘 확대 배율
   const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  let cardRunPeriod = "day"; // day | month | year
+  function dayRunLabel(ref, period) {
+    if (!(window.EHP_MOCK && window.EHP_MOCK.dayRunMin)) return "-";
+    const r = window.EHP_MOCK.dayRunMin(V, ref || {}, period || cardRunPeriod);
+    return r && r.label ? r.label : "-";
+  }
+  function runPeriodLabel(p) {
+    return p === "month" ? "이번 달" : (p === "year" ? "올해" : "오늘");
+  }
   const ctx = document.createElement("canvas").getContext("2d");
   const textW = (t, font) => { ctx.font = font; return ctx.measureText(t).width; };
   const F_NAME = '600 11.5px "Malgun Gothic", sans-serif';
@@ -16,7 +25,9 @@
 
   const params = new URLSearchParams(location.search);
   let floor = FL[params.get("floor")] ? params.get("floor") : "3F";
-  let selected = null; // { kind: "iu" | "od", hoki } 꼬리표 카드. 빈 곳을 눌러도 유지, × 로 닫음
+  let selected = null; // { kind: "iu" | "od", hoki } 꼬리표 카드. 빈 곳·다른 영역 클릭 또는 × 로 닫음
+  let cardKey = null; // 선택 유지 시 innerHTML 재작성 방지 (숫자 드럼 유지)
+  let sumKey = null;
   let hl = null;       // { od, units: Set } 실외기 소속 강조
   let k = 0.1;         // 도면 1단위(10 mm)당 화면 px
   let vb = { x: 0, y: 0 };
@@ -163,7 +174,8 @@
   function goFloor(f) {
     if (f && f !== floor) {
       floor = f;
-      if (selected && !onFloor(selected)) selected = null;
+      sumKey = null;
+      if (selected && !onFloor(selected)) { selected = null; cardKey = null; }
       drawFloor();
     }
   }
@@ -181,9 +193,31 @@
   svg.addEventListener("click", (e) => {
     const iu = e.target.closest(".iu");
     const od = e.target.closest(".od-mk");
-    if (iu) { hl = null; selected = { kind: "iu", hoki: iu.dataset.h }; }
-    else if (od) { hl = null; selected = { kind: "od", hoki: od.dataset.h }; }
-    else return; // 빈 곳을 눌러도 선택은 그대로 둔다
+    if (iu) {
+      hl = null;
+      selected = { kind: "iu", hoki: iu.dataset.h };
+      e.stopPropagation();
+      update();
+      return;
+    }
+    if (od) {
+      hl = null;
+      selected = { kind: "od", hoki: od.dataset.h };
+      e.stopPropagation();
+      update();
+      return;
+    }
+    if (!(selected || hl)) return;
+    selected = null;
+    hl = null;
+    update();
+  });
+  // 카드·아이콘·층선택 밖을 누르면 상태 카드/강조 닫기. 층 버튼은 강조 유지용으로 제외
+  document.addEventListener("click", (e) => {
+    if (!(selected || hl)) return;
+    if (e.target.closest(".tagcard, .iu, .od-mk, #floors, .fl-sum, .fl-legend")) return;
+    selected = null;
+    hl = null;
     update();
   });
   // 마우스를 올리면 아이콘을 키우고 이름 꼬리표를 크게 띄운다 (누르기 전에 무엇인지 알 수 있게)
@@ -205,7 +239,7 @@
       pos = iuPos(u); k2 = s.key;
     } else {
       const o = V.odByHoki[el.dataset.h], s = V.outdoorState(o);
-      name = o.label; sub = `${s.running ? `운전 ${s.modeLabel}` : s.label}  전력사용량 ${V.fmt(s.e15, 2)} kWh`;
+      name = o.label; sub = `${s.running ? (s.modeLabel || "운전") : s.label}  오늘 누적 전력 사용량 ${V.fmt(s.day, 1)} kWh`;
       pos = odPos(o.hoki); k2 = s.key === "run" ? s.modeKey : s.key;
     }
     hovertag.className = `hovertag show st-${k2}`;
@@ -232,13 +266,47 @@
   svg.addEventListener("mouseleave", hideHover);
 
   card.addEventListener("click", (e) => {
+    e.stopPropagation();
     if (e.target.closest(".tc-x")) { selected = null; hl = null; update(); return; }
+    const rp = e.target.closest(".tc-run-seg button[data-rp]");
+    if (rp) {
+      e.preventDefault();
+      const next = rp.dataset.rp;
+      const order = { day: 0, month: 1, year: 2 };
+      const dir = (order[next] ?? 0) >= (order[cardRunPeriod] ?? 0) ? 1 : -1;
+      cardRunPeriod = next;
+      const box = rp.closest(".tc-runbox");
+      if (box) {
+        const seg = box.querySelector(".tc-run-seg");
+        box.querySelectorAll(".tc-run-seg button").forEach((b) => b.classList.toggle("on", b.dataset.rp === cardRunPeriod));
+        if (window.EhpMotion && seg) {
+          const pill = window.EhpMotion.mountTabPill(seg);
+          const idx = [...seg.querySelectorAll("button")].findIndex((b) => b.dataset.rp === cardRunPeriod);
+          if (pill) pill.pick(idx);
+        }
+        const ref = { iu: box.dataset.refIu || null, od: box.dataset.refOd || null };
+        if (!ref.iu) delete ref.iu;
+        if (!ref.od) delete ref.od;
+        const val = box.querySelector("[data-run-val]");
+        const sub = box.querySelector(".tc-runbox-sub");
+        const label = dayRunLabel(ref, cardRunPeriod);
+        if (val && window.EhpMotion) window.EhpMotion.rollText(val, label, { dir });
+        else if (val) val.textContent = label;
+        if (sub) sub.textContent = `${runPeriodLabel(cardRunPeriod)} 누적`;
+      }
+      return;
+    }
     const l = e.target.closest("[data-od]");
-    if (l) highlightOd(l.dataset.od);
+    if (l) {
+      e.preventDefault();
+      highlightOd(l.dataset.od);
+    }
   });
   g("floors").addEventListener("click", (e) => {
+    e.stopPropagation();
     const b = e.target.closest(".fl-btn");
     if (!b) return;
+    // 연결 강조 중이면 실외기 층(src)·연결 실내기 층(served)만 강조를 유지
     if (!(hl && (b.classList.contains("served") || b.classList.contains("src")))) hl = null;
     if (b.dataset.f === floor) update(); else goFloor(b.dataset.f);
   });
@@ -292,22 +360,43 @@
     renderFloors(marks);
 
     const sum = g("sum");
+    const M = window.EhpMotion;
     if (floor === "RF") {
       const ods = Object.keys(FL.RF.od).map((h) => V.outdoorState(V.odByHoki[h]));
-      sum.innerHTML = `<b class="fl-name">옥상</b>
-        <span><em>실외기 운전</em><b class="ev-num">${ods.filter((s) => s.running).length}</b><span class="ev-muted">/${ods.length}</span></span>
-        <span><em>전력사용량(15분)</em><b class="ev-num">${V.fmt(ods.reduce((a, s) => a + (s.e15 || 0), 0), 2)}</b><span class="ev-muted"> kWh</span></span>`;
+      if (sumKey !== "RF") {
+        sumKey = "RF";
+        sum.innerHTML = `<b class="fl-name">옥상</b>
+          <span><em>실외기 운전</em><b class="ev-num" data-n="od-run"></b><span class="ev-muted">/<span data-n="od-all"></span></span></span>
+          <span><em>오늘 누적 전력 사용량</em><b class="ev-num" data-n="day"></b><span class="ev-muted"> kWh</span></span>`;
+      }
+      if (M) {
+        M.setNumber(sum.querySelector('[data-n="od-run"]'), ods.filter((s) => s.running).length);
+        M.setNumber(sum.querySelector('[data-n="od-all"]'), ods.length);
+        M.setNumber(sum.querySelector('[data-n="day"]'), ods.reduce((a, s) => a + (s.day || 0), 0), { decimals: 1 });
+      }
     } else {
       const ss = floorUnits(floor).map((u) => V.indoorState(u));
       const temps = ss.map((s) => s.room).filter((v) => v !== null);
       const avg = temps.length ? temps.reduce((a, b) => a + b, 0) / temps.length : null;
       const comm = ss.filter((s) => s.key === "comm").length;
-      sum.innerHTML = `<b class="fl-name">${V.FLOOR_LABEL[floor]}</b>
-        <span><em>운전</em><b class="ev-num">${ss.filter((s) => s.running).length}</b><span class="ev-muted">/${ss.length}</span></span>
-        <span><em>난방</em><b class="ev-num" style="color:var(--heat)">${ss.filter((s) => s.key === "heat").length}</b></span>
-        <span><em>냉방</em><b class="ev-num" style="color:var(--cool)">${ss.filter((s) => s.key === "cool").length}</b></span>
-        <span><em>평균 실내</em><b class="ev-num">${V.fmt(avg)}</b><span class="ev-muted">℃</span></span>
-        ${comm ? `<span><em>통신 없음</em><b class="ev-num">${comm}</b></span>` : ""}`;
+      const sk = `F:${floor}:${comm ? 1 : 0}`;
+      if (sumKey !== sk) {
+        sumKey = sk;
+        sum.innerHTML = `<b class="fl-name">${V.FLOOR_LABEL[floor]}</b>
+          <span><em>운전</em><b class="ev-num" data-n="run"></b><span class="ev-muted">/<span data-n="all"></span></span></span>
+          <span><em>난방</em><b class="ev-num" style="color:var(--heat)" data-n="heat"></b></span>
+          <span><em>냉방</em><b class="ev-num" style="color:var(--cool)" data-n="cool"></b></span>
+          <span><em>평균 실내</em><b class="ev-num" data-n="avg"></b><span class="ev-muted">℃</span></span>
+          ${comm ? `<span><em>통신 없음</em><b class="ev-num" data-n="comm"></b></span>` : ""}`;
+      }
+      if (M) {
+        M.setNumber(sum.querySelector('[data-n="run"]'), ss.filter((s) => s.running).length);
+        M.setNumber(sum.querySelector('[data-n="all"]'), ss.length);
+        M.setNumber(sum.querySelector('[data-n="heat"]'), ss.filter((s) => s.key === "heat").length);
+        M.setNumber(sum.querySelector('[data-n="cool"]'), ss.filter((s) => s.key === "cool").length);
+        M.setNumber(sum.querySelector('[data-n="avg"]'), avg, { decimals: 1 });
+        if (comm) M.setNumber(sum.querySelector('[data-n="comm"]'), comm);
+      }
     }
 
     // 실내기
@@ -351,59 +440,153 @@
 
   // ---------- 정보 꼬리표 카드 ----------
   function renderCard(marks) {
-    if (!selected || !onFloor(selected)) { card.classList.remove("show"); g("g-sel").innerHTML = ""; return; }
-    let html, pos, k2;
-    const tip = (kind, h) => {
+    if (!selected || !onFloor(selected)) {
+      cardKey = null;
+      card.classList.remove("show");
+      g("g-sel").innerHTML = "";
+      return;
+    }
+    const tipHtml = (kind, h) => {
       if (!marks) return "";
       const n = kind === "iu" ? marks.iu[h] : marks.od[h];
       if (!n) return "";
-      return `<div class="tc-ins"><span>인사이트 ${n}건</span><a href="insight.html">목록에서 보기</a></div>`;
+      const q = kind === "iu" ? `iu=${encodeURIComponent(h)}` : `od=${encodeURIComponent(h)}`;
+      return `<div class="tc-ins" data-ins><span>인사이트 <span data-n="ins"></span>건</span><a class="ehp-chip soft" href="insight.html?${q}">목록에서 보기</a></div>`;
     };
+    const key = `${selected.kind}:${selected.hoki}`;
+    const rebuild = cardKey !== key || !card.classList.contains("show");
+    cardKey = key;
+    let pos, k2;
+
     if (selected.kind === "iu") {
       const u = V.inByHoki[selected.hoki];
       const s = V.indoorState(u);
       const o = u.od ? V.odByHoki[u.od] : null;
       k2 = s.key;
       pos = iuPos(u);
-      const diff = s.room !== null && s.set !== null ? s.room - s.set : null;
-      html = `<div class="tc-h"><b>${esc(V.roomText(u) || u.label)}</b><button class="tc-x" title="닫기">×</button></div>
-        <div class="tc-sub">${V.FLOOR_LABEL[u.floor]} · ${esc(u.label)}${o ? ` · ${esc(o.label)}` : ""}</div>
-        <div class="tc-state"><span class="chip st-${s.key}">${s.label}</span></div>
-        <div class="tc-big">
-          <div><small>실내온도</small><b class="ev-num">${V.fmt(s.room)}</b><span>℃</span></div>
-          <div><small>설정온도</small><b class="ev-num">${V.fmt(s.set)}</b><span>℃</span></div>
-        </div>
-        <div class="tc-row"><span>운전</span><span>${s.onoff === 1 ? "운전" : s.onoff === 0 ? "정지" : "-"}</span></div>
-        <div class="tc-row"><span>운전모드</span><span>${V.MODE[s.mode] ? V.MODE[s.mode].label : "-"}</span></div>
-        <div class="tc-row"><span>풍량</span><span>${V.FAN[s.fan] || "-"}</span></div>
-        <div class="tc-row"><span>실내와 설정 차이</span><span class="ev-num">${diff === null ? "-" : (diff > 0 ? "+" : "") + V.fmt(diff) + " ℃"}</span></div>
-        <div class="tc-row"><span>연결 실외기</span>${o
-          ? `<a class="tc-link ${hl && hl.od === o.hoki ? "on" : ""}" data-od="${o.hoki}">${esc(o.label)}</a>`
-          : "<span class=\"ev-muted\">연결된 실외기 없음</span>"}</div>
-        ${tip("iu", u.hoki)}
-        <div class="tc-foot">${V.hhmm(s.ts)} 기준</div>`;
+      if (rebuild) {
+        card.innerHTML = `<div class="tc-h"><b data-title></b><button class="tc-x" title="닫기">×</button></div>
+          <div class="tc-sub" data-sub></div>
+          <div class="tc-state"><span class="chip" data-chip></span></div>
+          <div class="tc-big">
+            <div><small>실내온도</small><b class="ev-num" data-n="room"></b><span>℃</span></div>
+            <div><small>설정온도</small><b class="ev-num" data-n="set"></b><span>℃</span></div>
+          </div>
+          <div class="tc-runbox" data-ref-iu="${esc(u.hoki)}" data-ref-od="${esc(u.od || "")}">
+            <div class="tc-runbox-h">
+              <span>운전시간</span>
+              <span class="ins-pat-seg tc-run-seg">
+                <button type="button" data-rp="day" class="${cardRunPeriod === "day" ? "on" : ""}">오늘</button>
+                <button type="button" data-rp="month" class="${cardRunPeriod === "month" ? "on" : ""}">이번 달</button>
+                <button type="button" data-rp="year" class="${cardRunPeriod === "year" ? "on" : ""}">올해</button>
+              </span>
+            </div>
+            <b class="ev-num" data-run-val></b>
+            <small class="tc-runbox-sub"></small>
+          </div>
+          <div class="tc-row"><span>풍량</span><span data-fan></span></div>
+          <div class="tc-row"><span>실내와 설정 차이</span><span class="ev-num"><span data-n="diff"></span><span data-diff-unit></span></span></div>
+          <div class="tc-row" data-od-row></div>
+          <div data-ins-slot></div>
+          <div class="tc-foot" data-foot></div>`;
+        const seg = card.querySelector(".tc-run-seg");
+        if (seg && window.EhpMotion) window.EhpMotion.mountTabPill(seg);
+      }
+      card.querySelector("[data-title]").textContent = V.roomText(u) || u.label;
+      card.querySelector("[data-sub]").textContent = `${V.FLOOR_LABEL[u.floor]}, ${u.label}${o ? `, ${o.label}` : ""}`;
+      const chip = card.querySelector("[data-chip]");
+      chip.className = `chip st-${s.key}`;
+      chip.textContent = s.label;
+      card.querySelector("[data-fan]").textContent = V.FAN[s.fan] || "-";
+      const runVal = dayRunLabel({ iu: u.hoki, od: u.od || null }, cardRunPeriod);
+      const runEl = card.querySelector("[data-run-val]");
+      if (window.EhpMotion) window.EhpMotion.rollText(runEl, runVal);
+      else runEl.textContent = runVal;
+      card.querySelector(".tc-runbox-sub").textContent = `${runPeriodLabel(cardRunPeriod)} 누적`;
+      const odRow = card.querySelector("[data-od-row]");
+      odRow.innerHTML = o
+        ? `<span>연결 실외기</span><a class="ehp-chip ${hl && hl.od === o.hoki ? "on" : ""}" data-od="${o.hoki}">${esc(o.label)}</a>`
+        : `<span>연결 실외기</span><span class="ev-muted">연결된 실외기 없음</span>`;
+      card.querySelector("[data-ins-slot]").innerHTML = tipHtml("iu", u.hoki);
+      card.querySelector("[data-foot]").textContent = `${V.hhmm(s.ts)} 기준`;
+      if (window.EhpMotion) {
+        const M = window.EhpMotion;
+        const diff = s.room !== null && s.set !== null ? s.room - s.set : null;
+        M.setNumber(card.querySelector('[data-n="room"]'), s.room, { decimals: 1 });
+        M.setNumber(card.querySelector('[data-n="set"]'), s.set, { decimals: 1 });
+        const unit = card.querySelector("[data-diff-unit]");
+        if (diff === null) {
+          if (unit) unit.textContent = "";
+          M.setNumber(card.querySelector('[data-n="diff"]'), null, { decimals: 1 });
+        } else {
+          if (unit) unit.textContent = " ℃";
+          M.setNumber(card.querySelector('[data-n="diff"]'), Math.abs(diff), { decimals: 1 });
+        }
+        const insN = card.querySelector('[data-n="ins"]');
+        if (insN && marks && marks.iu[u.hoki]) M.setNumber(insN, marks.iu[u.hoki]);
+      }
     } else {
       const o = V.odByHoki[selected.hoki];
       const s = V.outdoorState(o);
       k2 = s.key === "run" ? s.modeKey : s.key;
       pos = odPos(o.hoki);
-      html = `<div class="tc-h"><b>${esc(o.label)}</b><button class="tc-x" title="닫기">×</button></div>
-        <div class="tc-sub">실외기, ${esc(o.panel || "")}</div>
-        <div class="tc-state"><span class="chip st-${k2}">${s.label}${s.running && s.modeLabel ? " " + s.modeLabel : ""}</span></div>
-        <div class="tc-big">
-          <div class="wide"><small>전력사용량</small><b class="ev-num">${V.fmt(s.e15, 2)}</b><span>kWh</span></div>
-          <div><small>현재 전력</small><b class="ev-num">${V.fmt(s.kw, 2)}</b><span>kW</span></div>
-          <div><small>부하율</small><b class="ev-num">${s.load === null ? "-" : V.fmt(s.load)}</b><span>%</span></div>
-        </div>
-        <div class="tc-row"><span>운전모드</span><span>${s.modeLabel || "-"}</span></div>
-        <div class="tc-row"><span>연결 실내기</span><span class="ev-num">운전 ${s.inOn} / ${s.inTotal}</span></div>
-        <a class="tc-btn ${hl && hl.od === o.hoki ? "on" : ""}" data-od="${o.hoki}">${hl && hl.od === o.hoki ? "강조 해제" : "연결 실내기 보기"}</a>
-        ${tip("od", o.hoki)}
-        <div class="tc-foot">${V.hhmm(s.ts)} 기준</div>`;
+      if (rebuild) {
+        card.innerHTML = `<div class="tc-h"><b data-title></b><button class="tc-x" title="닫기">×</button></div>
+          <div class="tc-sub" data-sub></div>
+          <div class="tc-state"><span class="chip" data-chip></span></div>
+          <div class="tc-big">
+            <div class="wide"><small>오늘 누적 전력 사용량</small><b class="ev-num" data-n="day"></b><span>kWh</span></div>
+            <div><small>현재 전력</small><b class="ev-num" data-n="kw"></b><span>kW</span></div>
+            <div><small>부하율</small><b class="ev-num" data-n="load"></b><span>%</span></div>
+          </div>
+          <div class="tc-runbox" data-ref-od="${esc(o.hoki)}">
+            <div class="tc-runbox-h">
+              <span>운전시간</span>
+              <span class="ins-pat-seg tc-run-seg">
+                <button type="button" data-rp="day" class="${cardRunPeriod === "day" ? "on" : ""}">오늘</button>
+                <button type="button" data-rp="month" class="${cardRunPeriod === "month" ? "on" : ""}">이번 달</button>
+                <button type="button" data-rp="year" class="${cardRunPeriod === "year" ? "on" : ""}">올해</button>
+              </span>
+            </div>
+            <b class="ev-num" data-run-val></b>
+            <small class="tc-runbox-sub"></small>
+          </div>
+          <div class="tc-row"><span>연결 실내기</span><span class="ev-num">운전 <span data-n="inOn"></span> / <span data-n="inTotal"></span></span></div>
+          <a class="tc-btn" data-od-btn data-od="${o.hoki}"></a>
+          <div data-ins-slot></div>
+          <div class="tc-foot" data-foot></div>`;
+        const seg = card.querySelector(".tc-run-seg");
+        if (seg && window.EhpMotion) window.EhpMotion.mountTabPill(seg);
+      }
+      card.querySelector("[data-title]").textContent = o.label;
+      card.querySelector("[data-sub]").textContent = `실외기, ${o.panel || ""}`;
+      const chip = card.querySelector("[data-chip]");
+      chip.className = `chip st-${k2}`;
+      chip.textContent = s.running ? (s.modeLabel || s.label) : s.label;
+      const runVal = dayRunLabel({ od: o.hoki }, cardRunPeriod);
+      const runEl = card.querySelector("[data-run-val]");
+      if (window.EhpMotion) window.EhpMotion.rollText(runEl, runVal);
+      else runEl.textContent = runVal;
+      card.querySelector(".tc-runbox-sub").textContent = `${runPeriodLabel(cardRunPeriod)} 누적`;
+      const btn = card.querySelector("[data-od-btn]");
+      btn.className = `tc-btn ${hl && hl.od === o.hoki ? "on" : ""}`;
+      btn.dataset.od = o.hoki;
+      btn.textContent = hl && hl.od === o.hoki ? "강조 해제" : "연결 실내기 보기";
+      card.querySelector("[data-ins-slot]").innerHTML = tipHtml("od", o.hoki);
+      card.querySelector("[data-foot]").textContent = `${V.hhmm(s.ts)} 기준`;
+      if (window.EhpMotion) {
+        const M = window.EhpMotion;
+        M.setNumber(card.querySelector('[data-n="day"]'), s.day, { decimals: 1 });
+        M.setNumber(card.querySelector('[data-n="kw"]'), s.kw, { decimals: 2 });
+        M.setNumber(card.querySelector('[data-n="load"]'), s.load, { decimals: 1 });
+        M.setNumber(card.querySelector('[data-n="inOn"]'), s.inOn);
+        M.setNumber(card.querySelector('[data-n="inTotal"]'), s.inTotal);
+        const insN = card.querySelector('[data-n="ins"]');
+        if (insN && marks && marks.od[o.hoki]) M.setNumber(insN, marks.od[o.hoki]);
+      }
     }
+
     card.className = `tagcard show st-${k2}`;
-    card.innerHTML = html;
-    // 아이콘 오른쪽에 붙이고, 자리가 없으면 왼쪽. 팝오버는 트리거 쪽에서 스케일 인
     const [px, py] = toPx(pos[0], pos[1]);
     const cw = plan.clientWidth, ch = plan.clientHeight, w = card.offsetWidth || 304, h = card.offsetHeight || 280;
     const gap = 44;
@@ -416,7 +599,6 @@
     card.style.setProperty("--arrow", `${Math.max(14, Math.min(h - 14, py - top))}px`);
     card.style.setProperty("--origin-x", right ? "0%" : "100%");
     card.style.setProperty("--origin-y", `${Math.max(8, Math.min(92, ((py - top) / Math.max(h, 1)) * 100))}%`);
-    // 아이콘과 카드를 잇는 선
     const ax = vb.x + (right ? px + 15 * SEL_SCALE * 0.6 : px - 15 * SEL_SCALE * 0.6) / k;
     const bx = vb.x + (right ? left : left + w) / k;
     g("g-sel").innerHTML = `<line class="tc-lead st-${k2}" x1="${ax}" y1="${pos[1]}" x2="${bx}" y2="${pos[1]}"/>`;

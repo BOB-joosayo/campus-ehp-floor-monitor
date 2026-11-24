@@ -63,9 +63,10 @@
 
   const TYPE = {
     night: { label: "심야 연속 운전", sev: "주의" },
-    vacation: { label: "방학·휴일형 운전", sev: "확인 권장" },
+    vacation: { label: "방학, 휴일형 운전", sev: "확인 권장" },
     season: { label: "계절과 모드 불일치", sev: "주의" },
     setpoint: { label: "설정온도 이상", sev: "주의" },
+    setgap: { label: "실내, 설정 온도 차이", sev: "확인 권장" },
     power: { label: "전력 패턴 이상", sev: "주의" },
     comm: { label: "통신 끊김 장기화", sev: "중요" },
   };
@@ -147,7 +148,7 @@
           type: "vacation",
           sev: "확인 권장",
           title: TYPE.vacation.label,
-          msg: `방학·휴일 기간인데 ${o.label}이(가) 운전 중입니다. 실제 이용인지 확인해 주세요.`,
+          msg: `방학, 휴일 기간인데 ${o.label}이(가) 운전 중입니다. 실제 이용인지 확인해 주세요.`,
           ts: now.getTime(),
           floor: null,
           od: o.hoki,
@@ -177,7 +178,7 @@
           });
         }
       }
-      // 심야 구간 운전. 연속·누적(분)은 on/off 이력이 있을 때 상세에서 확정.
+      // 심야: 지금 심야 구간에 켜져 있으면 발생. 실서비스는 15분 이력으로도 당일 건을 남겨 낮에도 목록에 보이게 한다.
       if (st.running && inNight(now, s)) {
         push({
           id: `night-iu-${u.hoki}-${ymd(now)}`,
@@ -192,34 +193,20 @@
           evidence: `심야 구간 현재 운전, 모드 ${st.label}, 누적 기준 ${s.nightMinMin}분`,
         });
       }
-      // 설정온도 이상: 기기 허용 밖, 모드와 안 맞는 설정, 실내와 큰 차이
-      // 삼성 DVM 설정 가능 대략 16~30℃. 학교 운용은 모드별로 더 좁게 본다.
+      // 설정온도 이상: 허용 밖, 냉방≥27, 난방≤19 (실내와의 차이는 setgap으로 분리)
       if (st.running && st.set != null) {
         const set = st.set;
-        const gap = st.room != null ? Math.abs(st.room - set) : null;
         let why = "";
         let evidence = "";
         if (set < 16 || set > 30) {
           why = `설정온도 ${V.fmt(set)}℃가 기기 설정 가능 범위(16~30℃)를 벗어났습니다.`;
           evidence = `설정 ${set}℃ (허용 밖)`;
-        } else if (st.mode === 1 && (set <= 18 || set >= 27)) {
-          // 냉방: 과냉(≤18) 또는 거의 안 도는 높은 설정(≥27)
-          why = set <= 18
-            ? `냉방인데 설정 ${V.fmt(set)}℃로 과하게 낮습니다.`
-            : `냉방인데 설정 ${V.fmt(set)}℃로 너무 높습니다.`;
+        } else if (st.mode === 1 && set >= 27) {
+          why = `냉방인데 설정 ${V.fmt(set)}℃로 너무 높습니다.`;
           evidence = `냉방, 설정 ${set}℃`;
-        } else if (st.mode === 2 && (set <= 19 || set >= 26)) {
-          // 난방: 거의 안 도는 낮은 설정(≤19) 또는 과열(≥26)
-          why = set <= 19
-            ? `난방인데 설정 ${V.fmt(set)}℃로 너무 낮습니다.`
-            : `난방인데 설정 ${V.fmt(set)}℃로 과하게 높습니다.`;
+        } else if (st.mode === 2 && set <= 19) {
+          why = `난방인데 설정 ${V.fmt(set)}℃로 너무 낮습니다.`;
           evidence = `난방, 설정 ${set}℃`;
-        } else if (gap != null && gap >= 5) {
-          // 송풍(3)은 온도 제어 의미가 약해 차이만 볼 때 제외. 제습·자동·냉·난은 차이 적용
-          if (st.mode !== 3) {
-            why = `설정 ${V.fmt(set)}℃인데 실내 ${V.fmt(st.room)}℃로 차이가 ${V.fmt(gap, 1)}℃입니다.`;
-            evidence = `설정 ${set}℃ / 실내 ${st.room}℃`;
-          }
         }
         if (why) {
           push({
@@ -235,6 +222,24 @@
             set,
             room: st.room,
             evidence,
+          });
+        }
+        // 실내, 설정 온도 차이: 원인 단정 없이 확인 권장. 송풍은 제외
+        const gap = st.room != null ? Math.abs(st.room - set) : null;
+        if (st.mode !== 3 && gap != null && gap >= 5) {
+          push({
+            id: `setgap-iu-${u.hoki}-${ymd(now)}`,
+            type: "setgap",
+            sev: "확인 권장",
+            title: TYPE.setgap.label,
+            msg: `설정 ${V.fmt(set)}℃, 실내 ${V.fmt(st.room)}℃로 차이가 ${V.fmt(gap, 1)}℃입니다. 원인(도달 여부, 센서, 외기 등)은 현장에서 확인해 주세요.`,
+            ts: now.getTime(),
+            floor: u.floor,
+            od: u.od || null,
+            iu: u.hoki,
+            set,
+            room: st.room,
+            evidence: `설정 ${set}℃ / 실내 ${st.room}℃ / 차이 ${V.fmt(gap, 1)}℃`,
           });
         }
       }
@@ -274,7 +279,7 @@
     return out;
   }
 
-  // 시연용 과거 이력 (일/월/년 조회용). 실데이터면 provider가 history를 넘겨도 된다.
+  // 과거 일별 조회용 이력. 실서비스는 에피소드를 DB에 저장하고, provider/API로 날짜별 조회한다.
   function demoHistory(V) {
     if (!(window.EHP_MOCK && window.EHP_MOCK.insightHistory)) return [];
     return window.EHP_MOCK.insightHistory(V);
@@ -327,7 +332,7 @@
         floor: u.floor || null,
         onPlan: !!u.floor,
         where: room,
-        meta: [floor, od || "연결 실외기 없음", `실내기 ${u.hoki}`].filter(Boolean).join(" · "),
+        meta: [floor, od || "연결 실외기 없음", `실내기 ${u.hoki}`].filter(Boolean).join(", "),
       };
     }
     if (x.od && V.odByHoki[x.od]) {
@@ -338,7 +343,7 @@
         floor: null,
         onPlan: true,
         where: o.label || `EHP-${o.hoki}`,
-        meta: `실외기 · 호기 ${o.hoki}`,
+        meta: `실외기, 호기 ${o.hoki}`,
       };
     }
     return { kind: "", kindLabel: "", floor: null, onPlan: false, where: "대상 미상", meta: "" };
