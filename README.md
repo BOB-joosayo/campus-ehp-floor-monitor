@@ -12,7 +12,7 @@
 - [AI 인사이트](https://bob-joosayo.github.io/campus-ehp-floor-monitor/insight.html)
 - [아이콘 상태 견본](https://bob-joosayo.github.io/campus-ehp-floor-monitor/states.html)
 
-![층별 도면](docs/floor-3f.png)
+![층별 도면](docs/v14-floor-3f.png)
 
 ## 규모
 
@@ -35,15 +35,19 @@
 
 | 실내기를 눌렀을 때 | 연결 실외기의 실내기 강조 |
 |---|---|
-| ![정보 카드](docs/floor-card.png) | ![강조](docs/floor-highlight.png) |
+| ![정보 카드](docs/v14-floor-card.png) | ![강조](docs/v14-floor-highlight.png) |
 
 | 옥상 실외기 | 실외기 종합 |
 |---|---|
-| ![옥상](docs/floor-roof.png) | ![실외기 종합](docs/outdoor.png) |
+| ![옥상](docs/v14-floor-roof.png) | ![실외기 종합](docs/v14-outdoor.png) |
 
-| AI 인사이트 목록 | 상세 드로어 |
+| 실외기 랭킹 (누적/실시간/부하/운전시간) | AI 인사이트 목록 |
 |---|---|
-| ![인사이트](docs/insight.png) | ![인사이트 상세](docs/insight-detail.png) |
+| ![랭킹](docs/v14-outdoor-rank.png) | ![인사이트](docs/v14-insight.png) |
+
+| AI 인사이트 상세 드로어 |
+|---|
+| ![인사이트 상세](docs/v14-insight-detail.png) |
 
 ### 층별 도면
 
